@@ -1,0 +1,235 @@
+#include "storage.h"
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <inttypes.h>
+#include <linux/limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <stdbool.h>
+
+void storage_init(storage_t* storage, const char* root_path) {
+  size_t path_size = strlen(root_path);
+  storage->root_path = (char*)malloc(path_size + 1);
+  storage->root_path[path_size] = '\0';
+  for (size_t ind = 0; ind < path_size; ++ind) {
+    storage->root_path[ind] = root_path[ind];
+  }
+}
+
+void storage_destroy(storage_t* storage) {
+  free(storage->root_path);
+}
+
+void key_parse(storage_key_t key, char* parsed_key) {
+  size_t key_length = strlen(key);
+  size_t parsed_key_length = key_length + key_length / 2 + 2;
+  parsed_key[parsed_key_length] = '\0';
+  for (size_t ind = 0, shift = 1; ind < key_length; ++ind) {
+    parsed_key[ind + shift] = (key)[ind];
+    if ((ind + 1) % 2 == 0) {
+      parsed_key[ind + ++shift] = '/';
+    }
+  }
+  parsed_key[0] = '/';
+  parsed_key[parsed_key_length - 1] = '$';
+}
+
+int init_key_space(storage_t* storage, char* parsed_key) {
+  DIR* tmp_dir;
+  char partial_path[PATH_MAX];
+  size_t root_path_len = strlen(storage->root_path);
+  size_t parsed_key_length = strlen(parsed_key);
+
+  partial_path[0] = '\0';
+  strcat(partial_path, storage->root_path);
+  partial_path[root_path_len] = '/';
+  partial_path[root_path_len + 1] = '\0';
+
+  for (size_t ind = 1; ind < parsed_key_length; ++ind) {
+    if (parsed_key[ind] == '/') {
+      if ((tmp_dir = opendir(partial_path)) == NULL) {
+        mkdir(partial_path, 0777);
+      }
+      if (tmp_dir != NULL) {
+        closedir(tmp_dir);
+      }
+    }
+    partial_path[root_path_len + ind] = parsed_key[ind];
+    partial_path[root_path_len + ind + 1] = '\0';
+  }
+  mkdir(partial_path, 0777);
+  strcat(partial_path, "/version_count");
+  partial_path[strlen(partial_path) + strlen("/version_count")] = '\0';
+
+  int fd_key_version_count =
+      open(partial_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+  uint64_t null_variant = 0;
+  ssize_t b_write = write(fd_key_version_count, &null_variant, 8);
+  if (b_write < 0) return -1;
+  close(fd_key_version_count);
+  return 0;
+}
+
+version_t exstract_version(char key_space_path[]) {
+  size_t key_space_path_len = strlen(key_space_path);
+  char key_version_path[PATH_MAX];
+  key_version_path[0] = '\0';
+  strcat(key_version_path, key_space_path);
+  key_version_path[key_space_path_len] = '\0';
+  strcat(key_version_path, "/version_count");
+  key_version_path[key_space_path_len + strlen("/version_count")] = '\0';
+  int fd_key_version_count = open(key_version_path, O_RDWR);
+  uint64_t key_version = 0;
+  ssize_t read_b = read(fd_key_version_count, &key_version, 8);
+  close(fd_key_version_count);
+  return key_version;
+}
+
+int key_space(storage_t* storage, char key_space_path[], char parsed_key[]) {
+  key_space_path[0] = '\0';
+  size_t key_space_path_len = strlen(storage->root_path) + strlen(parsed_key);
+  size_t key_storage_root_path_len = strlen(storage->root_path);
+  strcat(key_space_path, storage->root_path);
+  key_space_path[key_storage_root_path_len] = '\0';
+  strcat(key_space_path, parsed_key);
+  key_space_path[key_space_path_len] = '\0';
+}
+
+uint64_t uint64_string_size(uint64_t value) {
+  uint64_t counter = 1;
+  while (value / 10 != 0) {
+    ++counter;
+    value /= 10;
+  }
+  return counter;
+}
+
+int set_new_version(char key_space_path[], version_t new_version) {
+  char key_version_path[PATH_MAX];
+  key_version_path[0] = '\0';
+  size_t key_space_path_len = strlen(key_space_path);
+  strcat(key_version_path, key_space_path);
+  key_version_path[key_space_path_len] = '\0';
+  strcat(key_version_path, "/version_count");
+  key_version_path[key_space_path_len + strlen("/version_count")] = '\0';
+  int fd_key_version = open(key_version_path, O_RDWR);
+  lseek(fd_key_version, 0, SEEK_SET);
+  ssize_t b_write = write(fd_key_version, &new_version, 8);
+  if (b_write < 0) return -1;
+  close(fd_key_version);
+  return 0;
+}
+
+int value_path(char key_space_path[], version_t version,
+               char key_value_path[]) {
+  key_value_path[0] = '\0';
+  size_t key_space_path_len = strlen(key_space_path);
+  strcat(key_value_path, key_space_path);
+  key_value_path[key_space_path_len] = '\0';
+  strcat(key_value_path, "/");
+  key_value_path[key_space_path_len + 1] = '\0';
+  char key_string_version[21];
+  key_string_version[0] = '\0';
+  uint64_t key_string_version_len = uint64_string_size(version);
+  sprintf(key_string_version, "%" PRIu64, version);
+  key_string_version[key_string_version_len] = '\0';
+  strcat(key_value_path, key_string_version);
+  key_value_path[key_space_path_len + 1 + key_string_version_len] = '\0';
+  return 0;
+}
+
+version_t storage_set(storage_t* storage, storage_key_t key,
+                      storage_value_t value) {
+  char parsed_key[PATH_MAX];
+  char key_space_path[PATH_MAX];
+  key_parse(key, parsed_key);
+  key_space(storage, key_space_path, parsed_key);
+  DIR* key_space = opendir(key_space_path);
+  if (key_space == NULL) {
+    init_key_space(storage, parsed_key);
+  } else {
+    closedir(key_space);
+  }
+  version_t key_version = exstract_version(key_space_path);
+  ++key_version;
+
+  char key_value_path[PATH_MAX];
+  value_path(key_space_path, key_version, key_value_path);
+  int fd_key_value = open(key_value_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+  ssize_t b_write = write(fd_key_value, value, strlen(value));
+  ssize_t b_write2 = write(fd_key_value, "\0", 1);
+  if (b_write2 < 0) return -1;
+  if (b_write < 0) return -1;
+  close(fd_key_value);
+
+  set_new_version(key_space_path, key_version);
+  return key_version;
+}
+
+version_t storage_get(storage_t* storage, storage_key_t key,
+                      returned_value_t returned_value) {
+  char parsed_key[PATH_MAX];
+  char key_space_path[PATH_MAX];
+  key_parse(key, parsed_key);
+  key_space(storage, key_space_path, parsed_key);
+  DIR* key_space = opendir(key_space_path);
+  if (key_space == NULL) {
+    return 0;
+  } else {
+    closedir(key_space);
+  }
+  version_t key_version = exstract_version(key_space_path);
+
+  char key_value_path[PATH_MAX];
+  value_path(key_space_path, key_version, key_value_path);
+
+  int fd_key_value = open(key_value_path, O_RDWR);
+  size_t ind = 0;
+  ssize_t b_read; 
+  while (true) {
+    b_read = read(fd_key_value, returned_value + ind, 1);
+    if (b_read == -1) return -1;
+    if (returned_value[ind] == '\0') {
+      break;
+    }
+    ++ind;
+  }
+  close(fd_key_value);
+  return key_version;
+}
+
+version_t storage_get_by_version(storage_t* storage, storage_key_t key,
+                                 version_t version,
+                                 returned_value_t returned_value) {
+  char parsed_key[PATH_MAX];
+  char key_space_path[PATH_MAX];
+  key_parse(key, parsed_key);
+  key_space(storage, key_space_path, parsed_key);
+  DIR* key_space = opendir(key_space_path);
+  if (key_space == NULL) {
+    return 0;
+  } else {
+    closedir(key_space);
+  }
+
+  char key_value_path[PATH_MAX];
+  value_path(key_space_path, version, key_value_path);
+
+  int fd_key_value = open(key_value_path, O_RDWR);
+  size_t ind = 0;
+  ssize_t b_read; 
+  while (true) {
+    b_read = read(fd_key_value, returned_value + ind, 1);
+    if (b_read == -1) return -1;
+    if (returned_value[ind] == '\0') {
+      break;
+    }
+    ++ind;
+  }
+  close(fd_key_value);
+  return version;
+}
